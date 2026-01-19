@@ -285,27 +285,27 @@ pub const HashMap = struct {
     self.values()[i] = value;
   }
 
-  fn grow(self: *@This()) !void {
+  fn grow(old: *@This()) !void {
     @setEvalBranchQuota(1000_000);
-    if (self.available > self.size) return;
-    var new = try init(self.keys_string, if (self.size == 0) 16 else self.size * 2, self.allocator);
-    new.values_string = self.values_string;
-    new.size = self.size;
-    new.keys_string_len = self.keys_string_len;
+    if (old.available > old.size) return;
+    var self = try init(old.keys_string, if (old.size == 0) 16 else old.size * 2, old.allocator);
+    self.values_string = old.values_string;
+    self.size = old.size;
+    self.keys_string_len = old.keys_string_len;
 
-    for (self.meta(), self.keys(), self.values()) |m, k, v| {
+    for (old.meta(), old.keys(), old.values()) |m, k, v| {
       if (m == 0) continue;
       const kstr = self.keys_string[k.idx..][0..k.len];
       const hash, _ = getHFP(kstr);
       var i: usize = @intCast(hash & (self.cap - 1));
       while (self.meta()[i] != 0) : (i = (i + 1) & (self.cap - 1)) {}
-      new.meta()[i] = m;
-      new.keys()[i] = k;
-      new.values()[i] = v;
+      self.meta()[i] = m;
+      self.keys()[i] = k;
+      self.values()[i] = v;
     }
 
-    self.allocator.free(self.allocation());
-    self.* = new;
+    old.allocator.free(old.allocation());
+    old.* = self;
   }
 
   fn allocation(self: *@This()) []align(@alignOf(String)) u8 {
