@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const ParseOptions = struct {
   /// The logging function to use when priniting errors
@@ -93,32 +94,36 @@ pub const ParseValueError = error{
   SubstitutionKeyNotFound,
 } || ParseKeyError || std.mem.Allocator.Error;
 
-pub const ParseError = ParseValueError || std.fs.File.OpenError || std.fs.File.ReadError;
+pub const ParseError = ParseValueError || std.Io.File.OpenError || std.Io.File.LengthError || std.Io.File.ReadPositionalError;
 
 // Read and parse the `.env` file to a EnvType (hashmap)
 /// Caller owns the returned hashmap
-pub fn load(allocator: std.mem.Allocator, comptime options: ParseOptions) ParseError!EnvType {
-  return loadFrom(".env", allocator, options);
+pub fn load(io: std.Io, gpa: std.mem.Allocator, comptime options: ParseOptions) ParseError!EnvType {
+  return loadFrom(io, ".env", gpa, options);
 }
 
 /// Read and parse the provided env file to a EnvType (hashmap)
 /// Caller owns the returned hashmap
-pub fn loadFrom(file_name: []const u8, allocator: std.mem.Allocator, comptime options: ParseOptions) ParseError!EnvType {
-  var file = try std.fs.cwd().openFile(file_name, .{});
-  const file_data = file.readToEndAlloc(allocator, std.math.maxInt(usize)) catch |e| {
-    file.close();
-    return e;
-  };
-  file.close();
-  defer allocator.free(file_data);
-
-  return loadFromData(file_data, allocator, options);
+pub fn loadFrom(io: std.Io, file_name: []const u8, gpa: std.mem.Allocator, comptime options: ParseOptions) ParseError!EnvType {
+  var file = try std.Io.Dir.cwd().openFile(io, file_name, .{});
+  var data: []u8 = undefined;
+  {
+    errdefer file.close(io);
+    const len = try file.length(io);
+    data = try gpa.alloc(u8, len);
+    errdefer gpa.free(data);
+    _ = try file.readPositionalAll(io, data, 0);
+  }
+  file.close(io);
+  defer gpa.free(data);
+  
+  return loadFromData(data, gpa, options);
 }
 
 /// Read and parse the provided data string to a EnvType (hashmap)
 /// Caller owns the data memory and the returned hashmap
-pub fn loadFromData(data: []const u8, allocator: std.mem.Allocator, comptime options: ParseOptions) ParseValueError!EnvType {
-  var hm = try GetParser(options).parse(data, allocator);
+pub fn loadFromData(data: []const u8, gpa: std.mem.Allocator, comptime options: ParseOptions) ParseValueError!EnvType {
+  var hm = try GetParser(options).parse(data, gpa);
   defer hm.deinit();
   return .fromHashMap(&hm);
 }
@@ -130,13 +135,14 @@ pub fn loadComptime(options: ParseOptions) ParseValueError!ComptimeEnvType {
 
 /// Read and parse the provided env file to a ComptimeEnvType (actually a hashmap and NOT StaticStringMap)
 pub fn loadFromComptime(file_name: []const u8, options: ParseOptions) ParseValueError!ComptimeEnvType {
+  if (builtin.is_test) return ParseValueError.OutOfMemory;
   return comptime loadFromDataComptime(@embedFile(file_name), options);
 }
 
 /// Read and parse the provided data string to a ComptimeEnvType (actually a hashmap and NOT StaticStringMap)
-pub fn loadFromDataComptime(file_data: []const u8, options: ParseOptions) ParseValueError!ComptimeEnvType {
-  var hm = try GetParser(options).parse(file_data, comptime_allocator);
-  return comptime .fromHashMap(&hm);
+pub fn loadFromDataComptime(comptime file_data: []const u8, comptime options: ParseOptions) ParseValueError!ComptimeEnvType {
+  if (!@inComptime()) return ParseValueError.OutOfMemory;
+  return .fromHashMap(try GetParser(options).parse(file_data, comptime_allocator));
 }
 
 // This is taken from https://github.com/ziglang/zig/issues/1291
@@ -153,8 +159,10 @@ pub const comptime_allocator: std.mem.Allocator = struct {
 
   fn comptimeAlloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
     if (!@inComptime()) unreachable;
-    var bytes: [len]u8 align(alignment.toByteUnits()) = undefined;
-    return &bytes;
+    comptime {
+      var bytes: [len]u8 align(alignment.toByteUnits()) = undefined;
+      return &bytes;
+    }
   }
 
   fn comptimeResize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
@@ -215,9 +223,9 @@ pub const HashMap = struct {
   // NOTE: this is not the same as keys_string.len as the keys_string contains unused parts
   keys_string_len: usize = 0,
 
-  pub inline fn keys(self: *const @This()) []String { return self._keys[0..self.cap]; }
-  pub inline fn values(self: *const @This()) []String { return self._values[0..self.cap]; }
-  pub inline fn meta(self: *const @This()) []u8 { return self._meta[0..self.cap]; }
+  pub inline fn keys(self: @This()) []String { return self._keys[0..self.cap]; }
+  pub inline fn values(self: @This()) []String { return self._values[0..self.cap]; }
+  pub inline fn meta(self: @This()) []u8 { return self._meta[0..self.cap]; }
 
   pub fn init(keys_string: []const u8, cap: Size, allocator: std.mem.Allocator) !@This() {
     @setEvalBranchQuota(1000_000);
@@ -241,15 +249,15 @@ pub const HashMap = struct {
     return .{h, if (fp == 0) 1 else fp};
   }
 
-  fn hashString(self: *const @This(), string: String) u64 {
+  fn hashString(self: @This(), string: String) u64 {
     return std.hash_map.StringContext.hash(undefined, self.keys_string[string.idx..][0..string.len]);
   }
 
-  fn eqlString(self: *const @This(), string: String, other: []const u8) bool {
+  fn eqlString(self: @This(), string: String, other: []const u8) bool {
     return std.mem.eql(u8, self.keys_string[string.idx..][0..string.len], other);
   }
 
-  fn getIndex(self: *const @This(), fingerprint: u8, hash: u64, key: []const u8) usize {
+  fn getIndex(self: @This(), fingerprint: u8, hash: u64, key: []const u8) usize {
     var i: usize = @intCast(hash & (self.cap - 1));
     while (self.meta()[i] != 0) : (i = (i + 1) & (self.cap - 1)) {
       if (self.meta()[i] == fingerprint and self.eqlString(self.keys()[i], key)) break;
@@ -258,8 +266,9 @@ pub const HashMap = struct {
     return i;
   }
 
-  pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
+  pub fn get(self: @This(), key: []const u8) ?[]const u8 {
     @setEvalBranchQuota(1000_000);
+    if (self.size == 0) return null;
     const hash, const fingerprint = getHFP(key);
     const i = self.getIndex(fingerprint, hash, key);
     if (self.meta()[i] == 0) return null;
@@ -351,8 +360,10 @@ pub const ComptimeEnvType = struct {
   size: Size = 0,
 
   /// Create a new ComptimeEnvType from a HashMap
-  pub fn fromHashMap(comptime hm: *HashMap) @This() {
+  pub fn fromHashMap(comptime hm: HashMap) @This() {
     @setEvalBranchQuota(1000_000);
+    if (builtin.is_test and !@inComptime()) return undefined;
+    if (!@inComptime()) @compileError("ComptimeEnvType can only be instantiated at comptime");
     comptime {
       var self: @This() = .{ .cap = hm.cap, .size = hm.size };
       var buckets_v: []const Bucket = &.{};
@@ -410,12 +421,13 @@ pub const ComptimeEnvType = struct {
   };
 
   pub fn iterator(self: *const @This()) Iterator { return .{ .map = self }; }
-  pub inline fn count(self: *const @This()) usize { return self.size; }
-  pub inline fn capacity(self: *const @This()) usize { return self.cap; }
-  pub inline fn buckets(self: *const @This()) []const Bucket { return self._buckets[0..self.cap+1]; }
-  pub inline fn meta(self: *const @This()) []const u8 { return self._meta[0..self.cap]; }
+  pub inline fn count(self: @This()) usize { return self.size; }
+  pub inline fn capacity(self: @This()) usize { return self.cap; }
+  pub inline fn buckets(self: @This()) []const Bucket { return self._buckets[0..self.cap+1]; }
+  pub inline fn meta(self: @This()) []const u8 { return self._meta[0..self.cap]; }
 
-  pub fn getRuntime(self: *const @This(), key: []const u8) ?[]const u8 {
+  pub fn getRuntime(self: @This(), key: []const u8) ?[]const u8 {
+    if (self.size == 0) return null;
     const hash, const fingerprint = HashMap.getHFP(key);
     var i: usize = @intCast(hash & (self.cap - 1));
     while (self.meta()[i] != 0) : (i = (i + 1) & (self.cap - 1)) {
@@ -429,7 +441,7 @@ pub const ComptimeEnvType = struct {
     return null;
   }
 
-  pub fn get(comptime self: *const @This(), comptime key: []const u8) ?[]const u8 {
+  pub fn get(comptime self: @This(), comptime key: []const u8) ?[]const u8 {
     return comptime self.getRuntime(key);
   }
 
@@ -534,15 +546,18 @@ pub const EnvType = struct {
   pub fn iterator(self: *const @This()) Iterator {
     return .{ .buckets = self.buckets().ptr, .meta = self.meta().ptr, .data = self.data().ptr, .cap = self.cap };
   }
-  pub inline fn data(self: *const @This()) []const u8 { return self._meta[self.cap..][0..self._data_size]; }
-  pub inline fn count(self: *const @This()) usize { return self.size; }
-  pub inline fn capacity(self: *const @This()) usize { return self.cap; }
-  pub inline fn buckets(self: *const @This()) []const Bucket {
-    return @as([*]const Bucket, @ptrCast(@alignCast((self._meta - @as(usize, (self.cap + 1) * @sizeOf(Bucket))))))[0..self.cap+1];
+  pub inline fn data(self: @This()) []const u8 { return self._meta[self.cap..][0..self._data_size]; }
+  pub inline fn count(self: @This()) usize { return self.size; }
+  pub inline fn capacity(self: @This()) usize { return self.cap; }
+  inline fn buckets(self: @This()) []const Bucket {
+    const buckets_start = self._meta - @as(usize, (self.cap + 1) * @sizeOf(Bucket));
+    const buckets_ptr = @as([*]const Bucket, @ptrCast(@alignCast(buckets_start)));
+    return buckets_ptr[0..self.cap+1];
   }
-  pub inline fn meta(self: *const @This()) []const u8 { return self._meta[0..self.cap]; }
+  pub inline fn meta(self: @This()) []const u8 { return self._meta[0..self.cap]; }
 
   pub fn get(self: *const @This(), key: []const u8) ?[]const u8 {
+    if (self.size == 0) return null;
     const hash, const fingerprint = HashMap.getHFP(key);
     var i: usize = @intCast(hash & (self.cap - 1));
     const buckets_v = self.buckets();
@@ -960,8 +975,82 @@ pub fn GetParser(options: ParseOptions) type {
 // Tests
 //------
 
+fn ArgsTuple(comptime Function: type) ?type {
+  @setEvalBranchQuota(1000_000);
+  const info = @typeInfo(Function);
+  if (info != .@"fn") @compileError("ArgsTuple expects a function type");
+
+  const function_info = info.@"fn";
+  if (function_info.is_var_args) return null;
+
+  var argument_field_list: [function_info.params.len]type = undefined;
+  inline for (function_info.params, 0..) |arg, i| {
+    const T = arg.type orelse return null;
+    if (T == type or @typeInfo(T) == .@"fn") return null;
+    argument_field_list[i] = T;
+  }
+
+  return std.meta.Tuple(&argument_field_list);
+}
+
+fn initType(comptime T: type) T {
+  @setEvalBranchQuota(1000_000);
+  comptime var retval: T = undefined;
+  switch (@typeInfo(T)) {
+    .type => return void,
+    .void => return undefined,
+    .bool => return false,
+    .noreturn => unreachable,
+    .int => return 0,
+    .float => return 0.0,
+    .pointer => return @alignCast(@ptrCast(@constCast(&.{}))),
+    .array => |ai| inline for (0..ai.len) |i| {retval[i] = initType(ai.child);},
+    .@"struct" => |si| inline for (si.fields) |field| {@field(retval, field.name) = if (field.defaultValue()) |v| v else comptime initType(@FieldType(T, field.name));},
+    .comptime_float => return 0.0,
+    .comptime_int => return 0,
+    .undefined => unreachable,
+    .null, .optional => return null,
+    .error_union => |eu| return initType(eu.payload),
+    .error_set => |es_| if (es_) |es| {
+      if (es.len == 0) return undefined;
+      return @field(T, es[0].name);
+    } else error.AnyError,
+    .@"enum" => |ei| if (ei.fields.len != 0) {retval = @field(T, ei.fields[0].name);} else return undefined,
+    .@"union" => |ui| if (ui.fields.len != 0) {retval = @unionInit(T, ui.fields[0].name, initType(ui.fields[0].type));},
+    .@"fn" => return undefined,
+    .@"opaque", .frame, .@"anyframe" => unreachable,
+    .vector => |vi| inline for (vi.len) |i| {@field(retval, i) = initType(vi.child);},
+    .enum_literal => return undefined,
+  }
+  return retval;
+}
+
+/// If we use std.testing.refAllDeclsRecursive, we get a compile error because c has untranslatable code, hence we use this
+/// Even this touches the translated parts of the c code that we touch, but atleast not it doesn't crash
+fn refAllDeclsRecursive(comptime T: type) void {
+  inline for (comptime std.meta.declarations(T)) |decl| {
+    const field = @field(T, decl.name); 
+    _ = &field;
+
+    if (@TypeOf(field) == type) {
+      switch (@typeInfo(@field(T, decl.name))) {
+        .@"struct", .@"enum", .@"union", .@"opaque" => refAllDeclsRecursive(@field(T, decl.name)),
+        else => {},
+      }
+    } else if (@typeInfo(@TypeOf(field)) == .@"fn") {
+      var should_run: bool = false;
+      std.mem.doNotOptimizeAway(&should_run);
+      if (should_run) {
+        if (ArgsTuple(@TypeOf(field))) |Args| {
+          _ = &@call(.auto, field, comptime initType(Args));
+        }
+      }
+    }
+  }
+}
+
 test {
-  std.testing.refAllDeclsRecursive(@This());
+  refAllDeclsRecursive(@This());
 }
 
 const ENV_TEST_STRING_1: []const u8 = 
@@ -1001,19 +1090,6 @@ test loadFrom {
   try std.testing.expectEqualStrings("\xff\n\r\x0B\x0C", parsed.get("ESCAPE_SEQUENCES").?);
   try std.testing.expectEqualStrings("Multi\nline\n    value", parsed.get("MULTILINE_VALUE").?);
   try std.testing.expectEqualStrings("Multi\nline\n    value", parsed.get("UNQUOTED_MULTILINE").?);
-
-  const TestFns = struct {
-    fn loadFn(comptime data: []const u8, comptime options: ParseOptions) ParseError!EnvType {
-      return loadFromData(data, std.testing.allocator, options);
-    }
-
-    fn deinitFn(v: *EnvType) void {
-      v.deinit(std.testing.allocator);
-    }
-  };
-
-  const tests = GetTests(TestFns.loadFn, TestFns.deinitFn);
-  runTests(false, tests);
 }
 
 test loadFromComptime {
@@ -1034,6 +1110,24 @@ test loadFromComptime {
   try std.testing.expectEqualStrings("Multi\nline\n    value", parsed.get("MULTILINE_VALUE").?);
   try std.testing.expectEqualStrings("Multi\nline\n    value", parsed.get("UNQUOTED_MULTILINE").?);
 
+}
+
+test "runTests(false)" {
+  const TestFns = struct {
+    fn loadFn(comptime data: []const u8, comptime options: ParseOptions) ParseError!EnvType {
+      return loadFromData(data, std.testing.allocator, options);
+    }
+
+    fn deinitFn(v: *EnvType) void {
+      v.deinit(std.testing.allocator);
+    }
+  };
+
+  const tests = GetTests(TestFns.loadFn, TestFns.deinitFn);
+  runTests(false, tests);
+}
+
+test "runTests(true)" {
   const tests = comptime GetTests(loadFromDataComptime, struct {
     fn deinitFn(_: *ComptimeEnvType) void {}
   }.deinitFn);
