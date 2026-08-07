@@ -1,7 +1,7 @@
 .{
   .name = .dotenv,
   .version = "0.1.1",
-  .minimum_zig_version = "0.15.1",
+  .minimum_zig_version = "0.16.0",
   .fingerprint = 0xd19ca053c8ed32e9,
 
   .paths = .{
@@ -12,4 +12,3 @@
     "LICENSE",
   },
 }
-

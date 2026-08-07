@@ -1,6 +1,6 @@
 # dotenv
 Load ENV vars from `.env` file at runtime or comptime. As fast as my brain could handle.
-Tested with `0.15.1`, other versions may work as well.
+Tested with `0.16.0`, other versions may work as well. The `0.15` tag preserves the Zig 0.15-compatible release.
 
 This library provides functions for loading environment variables from `.env` files at runtime.
 It supports unquoting and unescaping of string values (including substitutions like `${VAR}`), comments, multiline values, and flexible customization via `ParseOptions`.
@@ -198,7 +198,7 @@ Trailing whitespace after value is trimmed, to preserve whitespace, use quoted v
 
 ### Logging and Customization
 - **Logging**: Via `log_fn` (default: `std.debug.print`; `NopLogFn` disables). Logs errors with context.
-- **Validation**: Custom `is_valid_first_key_char_fn`/`is_valid_key_char_fn` (self-referential, log on invalid).
+- **Validation**: Custom `is_valid_first_key_char_fn`/`is_valid_key_char_fn` predicates with signature `fn (u8) bool`; invalid characters are reported through `log_fn`.
 - **Peek**: `max_error_line_peek` limits error context.
 
 ### Edge Cases (from Tests)
@@ -219,4 +219,3 @@ Trailing whitespace after value is trimmed, to preserve whitespace, use quoted v
 | Value ending `\` (unquoted) | Literal | `KEY=val\` → `"val\\"` (only one `\`) |
 | Value ending `\` (unquoted) | Literal | `KEY=val\\` → `"val\\"` (only one `\`) |
 | Value ending `\` (unquoted) | Literal | `KEY=val\\\` → `"val\\\\"` (2 `\`) |
-

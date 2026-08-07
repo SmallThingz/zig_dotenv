@@ -6,9 +6,9 @@ pub const ParseOptions = struct {
   /// Set this to `NopLogFn` to disable logging
   log_fn: fn (comptime format: []const u8, args: anytype) void = DefaultLogFn,
   /// The function used to determine if the first character of a key is valid
-  is_valid_first_key_char_fn: fn (self: @This(), char: u8) bool = DefaultIsValidFirstKeyChar,
+  is_valid_first_key_char_fn: fn (char: u8) bool = DefaultIsValidFirstKeyChar,
   /// The function used to determine if any other character of a key is valid
-  is_valid_key_char_fn: fn (self: @This(), char: u8) bool = DefaultIsValidKeyChar,
+  is_valid_key_char_fn: fn (char: u8) bool = DefaultIsValidKeyChar,
   /// How many characters to print after the point at which the error occurred in parsing
   /// This cap is only applied if there is no newline uptile next `max_error_line_peek` characters
   max_error_line_peek: usize = 100,
@@ -38,31 +38,31 @@ pub const ParseOptions = struct {
   /// The default function to determine if the first character of a key is valid
   /// matches [a-zA-Z_]
   pub const DefaultIsValidFirstKeyChar = struct {
-    fn is_valid_first_key_char(self: Self, char: u8) bool {
-      const is_valid = std.ascii.isAlphabetic(char) or char == '_';
-      if (!is_valid) self.log_fn("First character for key should be [a-zA-Z_]; got: `{c}`\n", .{char});
-      return is_valid;
+    fn is_valid_first_key_char(char: u8) bool {
+      return std.ascii.isAlphabetic(char) or char == '_';
     }
   }.is_valid_first_key_char;
 
   /// The default function to determine if any other character of a key is valid
   /// matches [a-zA-Z0-9_]
   pub const DefaultIsValidKeyChar = struct {
-    fn is_valid_key_char(self: Self, char: u8) bool {
-      const is_valid = std.ascii.isAlphanumeric(char) or char == '_';
-      if (!is_valid) self.log_fn("Key can only contain [a-zA-Z0-9_]; got: `{c}`\n", .{char});
-      return is_valid;
+    fn is_valid_key_char(char: u8) bool {
+      return std.ascii.isAlphanumeric(char) or char == '_';
     }
   }.is_valid_key_char;
 
   /// Just a helper to call the function, for internal use only
   fn is_valid_first_key_char(self: @This(), char: u8) bool {
-    return self.is_valid_first_key_char_fn(self, char);
+    const is_valid = self.is_valid_first_key_char_fn(char);
+    if (!is_valid) self.log_fn("First character for key is invalid; got: `{c}`\n", .{char});
+    return is_valid;
   }
 
   /// Just a helper to call the function, for internal use only
   fn is_valid_key_char(self: @This(), char: u8) bool {
-    return self.is_valid_key_char_fn(self, char);
+    const is_valid = self.is_valid_key_char_fn(char);
+    if (!is_valid) self.log_fn("Key character is invalid; got: `{c}`\n", .{char});
+    return is_valid;
   }
 };
 
@@ -204,7 +204,7 @@ pub const HashMap = struct {
   // The keys_string
   keys_string: []const u8,
   // The string containing the concatenated values
-  values_string: std.ArrayList(u8) = .{},
+  values_string: std.ArrayList(u8) = .empty,
   // This is the start of our allocated block
   _keys: [*]String = &.{},
   // This comes after the keys
@@ -1774,4 +1774,3 @@ fn GetTests(loadFn: anytype, deinitFn: anytype) type {
     }
   };
 }
-
